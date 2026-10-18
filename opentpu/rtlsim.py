@@ -47,7 +47,8 @@ def verilator_version() -> str:
     return _VERSION
 
 
-def build_dir(top: str, sources: list[Path], params: dict | None = None) -> Path:
+def build_dir(top: str, sources: list[Path], params: dict | None = None,
+              extra_flags: list[str] | None = None) -> Path:
     """The build's directory: keyed on the sources' names (in the tree: OTPU_REMOTE_BUILD shares
     build/ between trees) and contents, the parameters, VFLAGS and Verilator's version."""
     h = hashlib.sha1()
@@ -57,16 +58,19 @@ def build_dir(top: str, sources: list[Path], params: dict | None = None) -> Path
         h.update(name.encode() + b"\0" + s.read_bytes() + b"\0")
     h.update(repr(sorted((params or {}).items())).encode())
     h.update(repr(VFLAGS).encode() + b"\0" + verilator_version().encode())
+    if extra_flags:
+        h.update(repr(extra_flags).encode())
     return BUILD / f"{top}_{h.hexdigest()[:12]}"
 
 
-def build(top: str, sources: list[Path], params: dict | None = None) -> Path:
+def build(top: str, sources: list[Path], params: dict | None = None,
+          extra_flags: list[str] | None = None) -> Path:
     """Compile `top` with Verilator (--binary); cached (build_dir). The build runs in a
     temporary directory, renamed into place once linked, under a lock per build: a concurrent
     build of the same waits for it instead of running a half-linked executable, and a build
     killed or failed leaves no executable for the next to take."""
     params = params or {}
-    out = build_dir(top, sources, params)
+    out = build_dir(top, sources, params, extra_flags)
     exe = out / f"V{top}"
     if exe.exists():
         return exe
@@ -81,6 +85,7 @@ def build(top: str, sources: list[Path], params: dict | None = None) -> Path:
         tmp = Path(tempfile.mkdtemp(prefix=f".{out.name}.", dir=BUILD))
         try:
             cmd = ["verilator", *VFLAGS, "--top-module", top, "-Mdir", str(tmp)]
+            cmd += list(extra_flags or [])
             cmd += [f"-G{k}={v}" for k, v in params.items()]
             cmd += [str(s) for s in sources]
             r = subprocess.run(cmd, capture_output=True, text=True)
@@ -226,7 +231,12 @@ def top_params(cfg, dram_lat: int = 8, uarch: dict | None = None, axi: bool | in
 
 
 def build_top(cfg, dram_lat: int = 8, uarch: dict | None = None, axi: bool = False,
-              dram_bytes: int | None = None, ldc: int | None = None) -> Path:
+              dram_bytes: int | None = None, ldc: int | None = None, hbm=None) -> Path:
+    if hbm is not None:
+        from .hbmsim import bridge_flags
+        return build("tb_top", [RTL / s for s in RTL_SOURCES] +
+                     [TB / "otpu_hbm_mem.sv", TB / "tb_top.sv"],
+                     top_params(cfg, dram_lat, uarch, 3, dram_bytes), bridge_flags())
     ldc = (MEMORY["LDC"] if ldc is None else ldc) if axi else 0
     shell = RTL / "shell"
     mem = ([shell / "otpu_afifo.sv", shell / "otpu_mem_ch.sv", TB / LDC_MODELS[ldc],
@@ -252,7 +262,7 @@ def _run(cfg, programs: list, images: list, dram_lat: int = 8, max_cycles: int =
         seed: int | None = None, bw: int | None = None, lat: int | None = None,
         plusargs: list | None = None, args=None, ldc: int | None = None,
         pokes: dict | None = None, again: list | None = None, reload: bool = False,
-        error_ok: bool = False):
+        error_ok: bool = False, hbm=None):
     """Run the RTL; returns (drams as uint8 arrays, tmems as uint32 arrays, stats). args: the
     run's arguments (R8..R15 at the start, as isasim.Machine). ldc: MEMORY's LDC for this run
     (the core at MEMORY's LDC_MHZ unless `plusargs` set +ldc_ratio: ldc_plusargs). pokes:
@@ -268,11 +278,16 @@ def _run(cfg, programs: list, images: list, dram_lat: int = 8, max_cycles: int =
     from . import isa as I
     run_args = args
     axi = MEMORY["AXI"] if axi is None else axi
+    if hbm is not None and (axi or ldc or pokes or again or reload):
+        raise ValueError("HBM cannot be combined with AXI/LDC, host pokes or repeated runs")
     axi = axi and cfg.D == 128
     boot = MEMORY["BOOT"] if boot is None else boot
     stall = MEMORY["STALL"] if stall is None else stall
     seed = MEMORY["SEED"] if seed is None else seed
     ldc = (MEMORY["LDC"] if ldc is None else ldc) if axi else 0
+    if hbm is not None:
+        if cfg.S * cfg.DRAM_BYTES > hbm.capacity_bytes:
+            raise ValueError("slice memories exceed enabled HBM pseudochannel capacity")
     tmp = Path(keep) if keep else Path(tempfile.mkdtemp(prefix="otpu_"))
     tmp.mkdir(parents=True, exist_ok=True)
     imgs, progs = [], []
@@ -290,8 +305,11 @@ def _run(cfg, programs: list, images: list, dram_lat: int = 8, max_cycles: int =
     grow = boot and at + 4 * max(len(p) for p in progs) > cfg.DRAM_BYTES
     if grow:
         at = cfg.DRAM_BYTES
+    if hbm is not None:
+        from .hbmsim import write_config
+        write_config(hbm, cfg, tmp / "hbm.json", 2 * cfg.DRAM_BYTES if grow else None)
     exe = build_top(cfg, 20 if axi else dram_lat, uarch, axi,
-                    2 * cfg.DRAM_BYTES if grow else None, ldc)
+                    2 * cfg.DRAM_BYTES if grow else None, ldc, hbm)
     for s in range(cfg.S):
         img = imgs[s]
         if boot:
@@ -316,6 +334,8 @@ def _run(cfg, programs: list, images: list, dram_lat: int = 8, max_cycles: int =
             f"{r:x} {ad // 4:x} {v & 0xFFFFFFFF:x}\n" for r, ad, v in pk))
     args = [str(exe), f"+dir={tmp}", f"+max_cycles={max_cycles}"] + (["+trace"] if trace else [])
     args += list(plusargs or [])
+    if hbm is not None:
+        args += [f"+hbm_config={tmp / 'hbm.json'}"]
     args += [f"+arg{k}={int(v) & 0xFFFFFFFF}" for k, v in enumerate(run_args or [])]
     if again:
         args += [f"+runs={1 + len(again)}"] + (["+reload"] if reload else [])
@@ -350,6 +370,14 @@ def _run(cfg, programs: list, images: list, dram_lat: int = 8, max_cycles: int =
             drams[s][at:at + 4 * len(progs[s])] = 0
     tmems = [_read_hex(tmp / f"tmem_{s}.hex", cfg.TMEM_WORDS) for s in range(cfg.S)]
     stats = {"cycles": cycles, "instructions": icounts}
+    if hbm is not None:
+        channels = [dict(zip(("pc", "read_tx", "write_tx", "rejected"), map(int, m)))
+                    for m in re.findall(r"HBM pc=(\d+) read_tx=(\d+) write_tx=(\d+) rejected=(\d+)", out)]
+        if len(channels) != 32:
+            raise RuntimeError("HBM run did not produce complete per-pseudochannel counters")
+        stats.update(hbm=hbm.to_dict(), hbm_channels=channels,
+                     device_seconds=cycles / (hbm.core_mhz * 1e6),
+                     accuracy="RTL core + uncalibrated direct-port HBM2 model")
     if error_ok:
         stats["error"] = bool(err)
     if axi:

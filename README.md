@@ -320,6 +320,8 @@ the card went from 0.052 (build 84989047, before K smoothing) to 0.012.
 6. [docs/board.md](docs/board.md): the physical card, from clocks to PCIe.
 7. [docs/targets.md](docs/targets.md): how one design builds for several boards and chips (a
    target file per build: `targets/*.toml`).
+8. [docs/hbm_sim.md](docs/hbm_sim.md): experimental RTL + Ramulator HBM2 performance
+   simulation, with 200 MHz FPGA and 1 GHz ASIC exploration profiles.
 
 ## What's next
 

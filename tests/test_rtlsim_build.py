@@ -48,6 +48,7 @@ def test_the_key_holds_flags_version_and_names(fake, monkeypatch, tmp_path):
     d0 = rtlsim.build_dir("a", [src], {"N": 1})
     assert d0 == rtlsim.build_dir("a", [src], {"N": 1})
     assert d0 != rtlsim.build_dir("a", [src], {"N": 2})
+    assert d0 != rtlsim.build_dir("a", [src], {"N": 1}, ["+define+OTPU_RAMULATOR"])
     flags = rtlsim.VFLAGS
     monkeypatch.setattr(rtlsim, "VFLAGS", flags + ["--assert"])
     assert rtlsim.build_dir("a", [src], {"N": 1}) != d0          # a flag (before: the same)
