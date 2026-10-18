@@ -73,6 +73,15 @@ module otpu_top
         .sw_req, .sw_addr, .sw_wdata, .sw_be,
         .b_req, .b_tag, .b_we, .b_wmask, .b_wdata, .b_addr, .b_rvalid, .b_rtag, .b_rdata, .rd_idle,
         .dump);
+`ifdef OTPU_RAMULATOR
+    end else if (AXI == 3) begin : g_hbm
+      otpu_hbm_mem #(.WORDS(DRAM_WORDS), .D(D), .SID(s)) u_mem (
+        .clk, .rst(sys_rst), .dump,
+        .a_req, .a_we, .a_addr, .a_wdata, .a_be, .a_rdy, .a_rvalid, .a_rdata, .a_rdata2,
+        .sw_req, .sw_addr, .sw_wdata, .sw_be, .sw_rdy,
+        .b_req, .b_we, .b_tag, .b_addr, .b_wmask, .b_wdata,
+        .b_rdy, .b_rvalid, .b_rtag, .b_rdata, .wr_idle, .rd_idle);
+`endif
     end else begin : g_native
       logic [1:0] cvalid, cready, cwe, wvalid, wready, rvalid;
       logic [1:0][24:0] caddr;
